@@ -16,17 +16,23 @@
 package net.wequick.gradle
 
 import org.gradle.api.Project
+import org.gradle.util.VersionNumber
 
 public class RootExtension extends BaseExtension {
 
-    private static final String PLUGIN_GROUP = 'net.wequick.tools.build'
-    private static final String PLUGIN_MODULE = 'gradle-small'
     private static final String FD_BUILD_SMALL = 'build-small'
     private static final String FD_PRE_JAR = 'small-pre-jar'
     private static final String FD_PRE_AP = 'small-pre-ap'
     private static final String FD_PRE_IDS = 'small-pre-ids'
+    private static final String FD_PRE_LINK = 'small-pre-link'
     private static final String FD_BASE = 'base'
     private static final String FD_LIBS = 'libs'
+    private static final String FD_JAR = 'jar'
+    private static final String FD_AAR = 'aar'
+
+    /** The minimum small aar version required */
+    private static final String REQUIRED_AAR_VERSION = '1.0.0'
+    private static final VersionNumber REQUIRED_AAR_REVISION = VersionNumber.parse(REQUIRED_AAR_VERSION)
 
     /** 
      * Version of aar net.wequick.small:small
@@ -34,14 +40,31 @@ public class RootExtension extends BaseExtension {
      */
     String aarVersion
 
+    /**
+     * Host module name
+     * default to `app'
+     */
+    String hostModuleName
+
+    /** The parsed revision of `aarVersion' */
+    private VersionNumber aarRevision
+
+    /**
+     * Strict mode, <tt>true</tt> if keep only resources in bundle's res directory.
+     */
+    boolean strictSplitResources = true
+
     /** Count of libraries */
     protected int libCount
 
     /** Count of bundles */
     protected int bundleCount
 
-    /** Whether contains project small */
-    protected boolean hasSmallProject
+    /** Project of Small AAR module */
+    protected Project smallProject
+
+    /** Project of host */
+    protected Project hostProject
 
     /** Directory to output bundles (*.so) */
     protected File outputBundleDir
@@ -60,8 +83,14 @@ public class RootExtension extends BaseExtension {
     /** Directory of pre-build R.txt */
     private File preIdsDir
 
+    /** Directory of prepared dependencies */
+    private File preLinkAarDir
+    private File preLinkJarDir
+
     RootExtension(Project project) {
         super(project)
+
+        hostModuleName = 'app'
 
         preBuildDir = new File(project.projectDir, FD_BUILD_SMALL)
         def interDir = new File(preBuildDir, FD_INTERMEDIATES)
@@ -70,12 +99,9 @@ public class RootExtension extends BaseExtension {
         preLibsJarDir = new File(jarDir, FD_LIBS)
         preApDir = new File(interDir, FD_PRE_AP)
         preIdsDir = new File(interDir, FD_PRE_IDS)
-
-        def pluginModule = project.buildscript.configurations.classpath.
-                resolvedConfiguration.firstLevelModuleDependencies.find {
-            it.moduleGroup == PLUGIN_GROUP && it.moduleName == PLUGIN_MODULE
-        }
-        if (pluginModule != null) aarVersion = pluginModule.moduleVersion
+        def preLinkDir = new File(interDir, FD_PRE_LINK)
+        preLinkJarDir = new File(preLinkDir, FD_JAR)
+        preLinkAarDir = new File(preLinkDir, FD_AAR)
     }
 
     public File getPreBuildDir() {
@@ -96,5 +122,60 @@ public class RootExtension extends BaseExtension {
 
     public File getPreIdsDir() {
         return preIdsDir
+    }
+
+    public File getPreLinkJarDir() {
+        return preLinkJarDir
+    }
+
+    public File getPreLinkAarDir() {
+        return preLinkAarDir
+    }
+
+    public String getAarVersion() {
+        if (aarVersion == null) {
+            throw new RuntimeException(
+                    'Please specify Small aar version in your root build.gradle:\n' +
+                            "small {\n    aarVersion = '[the_version]'\n}")
+        }
+
+        if (aarRevision == null) {
+            synchronized (this.class) {
+                if (aarRevision == null) {
+                    aarRevision = VersionNumber.parse(aarVersion)
+                }
+            }
+        }
+        if (aarRevision < REQUIRED_AAR_REVISION) {
+            throw new RuntimeException(
+                    "Small aar version $REQUIRED_AAR_VERSION is required. Current version is $aarVersion"
+            )
+        }
+
+        return aarVersion
+    }
+
+    Map<String, Set<String>> bundleModules = [:]
+
+    public void bundles(String type, String name) {
+        def modules = bundleModules.get(type)
+        if (modules == null) {
+            modules = new HashSet<String>()
+            bundleModules.put(type, modules)
+        }
+        modules.add(name)
+    }
+
+    public void bundles(String type, names) {
+        def modules = bundleModules.get(type)
+        if (modules == null) {
+            modules = new HashSet<String>()
+            bundleModules.put(type, modules)
+        }
+        modules.addAll(names)
+    }
+
+    public void compileSdkVersion(int apiLevel) {
+
     }
 }

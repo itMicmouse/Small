@@ -27,6 +27,7 @@ import org.gradle.logging.StyledTextOutputFactory
 public abstract class BasePlugin implements Plugin<Project> {
 
     public static final String SMALL_AAR_PREFIX = "net.wequick.small:small:"
+    public static final String SMALL_JAR_PATTERN = "net.wequick.small-small-*.jar"
     public static final String SMALL_LIBS = 'smallLibs'
 
     protected boolean isBuildingBundle
@@ -78,13 +79,10 @@ public abstract class BasePlugin implements Plugin<Project> {
         // Automatic add `small' dependency
         if (smallCompileType != null) {
             project.afterEvaluate {
-                RootPlugin rootPlugin = (RootPlugin) project.rootProject.plugins.
-                        withType(RootPlugin.class)[0]
-                RootExtension rootExt = rootPlugin.small
-                if (rootExt.hasSmallProject) {
-                    project.dependencies.add(smallCompileType, project.project(':small'))
+                if (rootSmall.smallProject != null) {
+                    project.dependencies.add(smallCompileType, rootSmall.smallProject)
                 } else {
-                    def version = rootExt.aarVersion
+                    def version = rootSmall.aarVersion
                     project.dependencies.add(smallCompileType, "${SMALL_AAR_PREFIX}$version")
                 }
             }
@@ -97,6 +95,10 @@ public abstract class BasePlugin implements Plugin<Project> {
         return (T) project.small
     }
 
+    protected RootExtension getRootSmall() {
+        return project.rootProject.small
+    }
+
     protected PluginType getPluginType() { return PluginType.Unknown }
 
     /** Restore state for DEBUG mode */
@@ -106,11 +108,9 @@ public abstract class BasePlugin implements Plugin<Project> {
 
     protected abstract Class<? extends BaseExtension> getExtensionClass()
 
-    // Following functions for printing colourful text
-    protected void printInfo(String text) {
-
-    }
-
+    /**
+     * This class consists exclusively of static methods for printing colourful text
+     */
     public final class Log {
 
         protected static StyledTextOutput out
@@ -125,6 +125,10 @@ public abstract class BasePlugin implements Plugin<Project> {
             out.style(Style.Normal).format('\t%-64s', text)
             out.withStyle(Style.Identifier).text('[  OK  ]')
             out.println()
+        }
+
+        public static void warn(String text) {
+            out.style(Style.UserInput).format('\t%s', text).println()
         }
 
         public static void footer(String text) {

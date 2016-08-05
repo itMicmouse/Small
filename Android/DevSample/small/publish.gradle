@@ -3,11 +3,12 @@ buildscript {
         jcenter()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:1.5.0'
+        classpath 'com.android.tools.build:gradle:2.0.0'
     }
 }
 
 apply from: 'base.gradle'
+apply from: 'version.gradle'
 
 //--------------------------------------------------------------------------------------------------
 // Scripts to upload plugin to Bintray/JCenter [https://bintray.com/]
@@ -86,6 +87,7 @@ task sourcesJar(type: Jar) {
 }
 
 task javadoc(type: Javadoc) {
+    failOnError = false
     source = android.sourceSets.main.java.srcDirs
     classpath += project.files(android.getBootClasspath().join(File.pathSeparator))
     options.locale = 'en_US'

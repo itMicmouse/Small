@@ -2,6 +2,7 @@ package net.wequick.example.small.app.mine;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.support.annotation.Keep;
 import android.support.v4.app.Fragment;
 import android.os.Bundle;
 import android.view.LayoutInflater;
@@ -10,6 +11,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.TextView;
 
+import com.example.hellojni.HelloPluginJni;
 import com.example.mylib.Greet;
 import net.wequick.example.small.lib.utils.UIUtils;
 
@@ -21,6 +23,7 @@ import java.io.InputStreamReader;
 /**
  * Created by galen on 15/11/12.
  */
+@Keep
 public class MainFragment extends Fragment {
 
     private static final int REQUEST_CODE_COLOR = 1000;
@@ -31,7 +34,7 @@ public class MainFragment extends Fragment {
         View rootView = inflater.inflate(R.layout.fragment_main, container, false);
         TextView tvSection = (TextView) rootView.findViewById(R.id.section_label);
         tvSection.setText(R.string.hello);
-        tvSection.setTextColor(getResources().getColor(net.wequick.example.small.lib.utils.R.color.my_test_color2));
+        tvSection.setTextColor(getResources().getColor(R.color.my_test_color2));
 
         Button button = (Button) rootView.findViewById(R.id.inter_start_button);
         button.setOnClickListener(new View.OnClickListener() {
@@ -53,8 +56,6 @@ public class MainFragment extends Fragment {
         });
 
         try {
-//            assert (getResources().getAssets().equals(getContext().getAssets()));
-
             InputStream is = getResources().getAssets().open("greet.txt");
             BufferedReader br = new BufferedReader(new InputStreamReader(is));
             String greet = br.readLine();
@@ -62,12 +63,32 @@ public class MainFragment extends Fragment {
 
             TextView tvAssets = (TextView) rootView.findViewById(R.id.assets_label);
             tvAssets.setText("assets/greet.txt: " + greet);
+
+            is = getResources().openRawResource(R.raw.greet);
+            br = new BufferedReader(new InputStreamReader(is));
+            greet = br.readLine();
+            is.close();
+
+            TextView tvRaw = (TextView) rootView.findViewById(R.id.raw_label);
+            tvRaw.setText("res/raw/greet.txt: " + greet);
+
+            is = getResources().openRawResource(R.raw.mq_new_message);
+            System.out.println("### " + is.available());
+            is.close();
+
+
         } catch (IOException e) {
             e.printStackTrace();
         }
 
+        // TODO: Following will crash, try to fix it
+//        getResources().openRawResourceFd(R.raw.greet);
+
         TextView tvLib = (TextView) rootView.findViewById(R.id.lib_label);
         tvLib.setText(Greet.hello());
+
+        TextView tvJni = (TextView) rootView.findViewById(R.id.jni_label);
+        tvJni.setText(HelloPluginJni.stringFromJNI());
 
         return rootView;
     }

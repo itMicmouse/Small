@@ -17,14 +17,18 @@ package net.wequick.gradle
 
 import org.gradle.api.Project
 import org.gradle.api.Task
+import org.gradle.api.tasks.compile.JavaCompile
 
 public class AppExtension extends BundleExtension {
 
     /** Task of java compiler */
-    Task javac
+    JavaCompile javac
 
-    /** Task of dex */
-    Task dex
+    /** Task of merge manifest */
+    Task processManifest
+
+    /** Variant application id */
+    String packageName
 
     /** Package path for java classes */
     String packagePath
@@ -41,9 +45,6 @@ public class AppExtension extends BundleExtension {
     /** Directory of all exploded aar */
     File aarDir
 
-    /** Directory of split exploded aar */
-    File bkAarDir
-
     /** File of resources.ap_ */
     File apFile
 
@@ -56,10 +57,27 @@ public class AppExtension extends BundleExtension {
     /** Public symbol file - public.txt */
     File publicSymbolFile
 
+    /** Paths of aar to split */
+    Set<Map> splitAars
+
+    /** Paths of aar to retain */
+    Set<Map> retainedAars
+
+    /** File of split R.java */
+    File splitRJavaFile
+
     LinkedHashMap<Integer, Integer> idMaps
     LinkedHashMap<String, String> idStrMaps
     ArrayList retainedTypes
     ArrayList retainedStyleables
+    Map<String, List> vendorTypes
+    Map<String, List> vendorStyleables
+
+    /** List of all resource types */
+    ArrayList allTypes
+
+    /** List of all resource styleables */
+    ArrayList allStyleables
 
     AppExtension(Project project) {
         super(project)
@@ -67,7 +85,6 @@ public class AppExtension extends BundleExtension {
         File interDir = new File(project.buildDir, FD_INTERMEDIATES)
 
         aarDir = new File(interDir, 'exploded-aar')
-        bkAarDir = new File(interDir, 'exploded-aar~')
         publicSymbolFile = new File(project.projectDir, 'public.txt')
     }
 }

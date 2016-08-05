@@ -137,13 +137,20 @@ public class ArscEditor extends AssetEditor {
                     offset += entry.allSize
                     if (!retainedKeyIds.contains(entry.key)) retainedKeyIds.add(entry.key)
                     retainedEntries.add(entry)
+                    int dataType
                     if (entry.value != null) {
                         // Reset entry ids
-                        if (entry.value.dataType == ResValueDataType.TYPE_STRING) {
+                        dataType = entry.value.dataType
+                        if (dataType == ResValueDataType.TYPE_STRING) {
                             // String reference
-                            retainedStringIds.add(entry.value.data)
-                            entry.value.data = retainedStringIds.size() - 1
-                        } else if (entry.value.dataType == ResValueDataType.TYPE_REFERENCE) {
+                            def oldId = entry.value.data
+                            def newId = retainedStringIds.indexOf(oldId)
+                            if (newId < 0) {
+                                retainedStringIds.add(oldId)
+                                newId = retainedStringIds.size() - 1
+                            }
+                            entry.value.data = newId
+                        } else if (dataType == ResValueDataType.TYPE_REFERENCE) {
                             def id = idMaps.get(entry.value.data)
                             if (id != null) {
                                 if (DEBUG_NOISY) println "\t -- map ResTable_entry.value: " +
@@ -170,7 +177,17 @@ public class ArscEditor extends AssetEditor {
                                         "${String.format('0x%08x', id)}"
                                 it.name = id
                             }
-                            if (it.value.dataType == ResValueDataType.TYPE_REFERENCE) {
+                            dataType = it.value.dataType
+                            if (dataType == ResValueDataType.TYPE_STRING) {
+                                // String reference
+                                def oldId = it.value.data
+                                def newId = retainedStringIds.indexOf(oldId)
+                                if (newId < 0) {
+                                    retainedStringIds.add(oldId)
+                                    newId = retainedStringIds.size() - 1
+                                }
+                                it.value.data = newId
+                            } else if (dataType == ResValueDataType.TYPE_REFERENCE) {
                                 id = idMaps.get(it.value.data)
                                 if (id != null) {
                                     if (DEBUG_NOISY) println "\t -- map ResTable_map.value: " +
@@ -653,22 +670,6 @@ public class ArscEditor extends AssetEditor {
 
         // Paste data from clip channel
         pasteLaterData(pos)
-    }
-
-    /** Convert utf-16 to utf-8 */
-    private static def getUtf16String(name) {
-        int len = name.length / 2
-        def buffer = new char[len]
-        int i = 0;
-        for (int j = 0; j < len; j+=2) {
-            char c = (char)name[j]
-            if (c == 0) {
-                buffer[i] = '\0'
-                break
-            }
-            buffer[i++] = c
-        }
-        return String.copyValueOf(buffer, 0, i)
     }
 
     private static def getConfigName(c) {

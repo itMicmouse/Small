@@ -10,6 +10,10 @@
       "pkg": "com.example.mysmall.lib.style"
     },
     {
+      "uri": "lib.analytics",
+      "pkg": "net.wequick.example.lib.analytics"
+    },
+    {
       "uri": "main",
       "pkg": "net.wequick.example.small.app.main"
     },
@@ -23,7 +27,10 @@
     },
     {
       "uri": "detail",
-      "pkg": "net.wequick.example.small.app.detail"
+      "pkg": "net.wequick.example.small.app.detail",
+      "rules": {
+        "sub": "Sub"
+      }
     },
     {
       "uri": "about",

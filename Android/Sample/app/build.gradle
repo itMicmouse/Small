@@ -5,16 +5,16 @@ android {
     buildToolsVersion "23.0.1"
 
     defaultConfig {
-        minSdkVersion 8
+        minSdkVersion 9
         targetSdkVersion 23
         applicationId "net.wequick.example.small"
         versionCode 1
         versionName "1.0"
-        manifestPlaceholders = [UMENG_CHANNEL_VALUE: "official"]
+        manifestPlaceholders = [UMENG_CHANNEL_VALUE: "official", UMENG_APPKEY: "5746460b67e58e43860000e1"]
     }
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
@@ -40,8 +40,7 @@ android {
     }
 
     productFlavors {
-        baidu {}
-        qihu360 {}
+        wequick {}
     }
     productFlavors.all { flavor ->
         flavor.manifestPlaceholders = [UMENG_CHANNEL_VALUE: name]

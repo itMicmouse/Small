@@ -1,3 +1,117 @@
+## 1.1.0-beta3 (2016-08-01)
+
+  - 修正在`5.0`以上系统可能出现的`getPooledStringForCookie`数组越界问题
+
+## 1.1.0-beta2 (2016-07-29)
+
+Bugfixes:
+
+  - 修正 _singleTask_ 与 _singleTop_ launchMode匹配错误的问题 (#193, #231)
+
+## 1.1.0-beta1 (2016-07-21)
+
+Features:
+
+  - `bundle.json`支持宿主路由配置 (pkg不配置)
+  - `bundle.json`支持自定义插件`type`
+  - 支持将插件manifest的Launcher作为默认路由Activity
+  - 使用`Instant Run`方式修改宿主资源`mAssets`来完成资源合并, 兼容Xposed (#190)
+
+Bugfixes:
+
+  - [重要] 修正插件application在异常重启后无法触发`onCreate`的问题
+
+Other:
+
+  - `Bundle`类导出`versionCode`与`versionName`的获取API
+
+## 1.0.0 (2016-06-29)
+
+Performance:
+
+  - 并发加载插件以提高首次加载速度
+  - 使用CRC校验提高二次加载速度
+  - 释放中间变量以优化内存
+
+Bugfixes:
+
+  - 创建插件application操作移至UI线程 (#173)
+  - 修正不包含资源的插件被`addAssetPath`后在4.4以下出现的闪退问题 (#62, #139)
+
+## 1.0.0-beta2 (2016-05-19)
+
+Bugfixes:
+
+  - 修正small包误编译进appcompat/R.class导致的无法运行问题
+
+## 1.0.0-beta1 (2016-05-18)
+
+Features:
+
+  - 支持新增插件 (#72)
+  - 标记升级时，支持在进入后台后自动重启应用，完成静默升级
+
+Performance:
+
+  - 重构各反射方法至`private static Vxx`私有类下
+  - 增加`addAssetPaths`方法以减少`addAssetPath`反射次数
+  - 减少dex相关`expandArray`反射次数
+
+Bugfixes:
+
+  - 修正插件`application`的`onCreate`调用时机 (#136)
+  - 修正`Nubia`机型可能出现的闪退 (#135)
+
+## 0.9.0 (2016-04-21)
+
+Performance:
+
+  - 改进资源hook，一步到位，无需每次在创建插件Activity时反射修改其Resources与应用主题
+  - 改进插件ActivityInfo hook，增加targetActivity属性以利用系统源码自动回复真身
+  - 将bundle.json解析放入线程，移除部分同步I/O操作，提高首次启动速度
+
+Bugfixes:
+
+  - 修正插件ABI 32位与64位冲突问题
+
+Others:
+
+  - 最小支持版本升至2.3，API 9
+  - 重构部分接口以支持ProGuard
+
+## 0.8.0 (2016-04-12)
+
+Features:
+
+  - 支持插件携带.so文件 (#79)
+  - 支持插件Activity透明 (#94)
+
+Performance:
+
+  - 优化部分代码，支持宿主混淆 (#85)
+
+Bugfixes:
+
+  - 修正`rules`搜寻Activity逻辑错误
+
+## 0.7.0 (2016-04-05)
+
+Features:
+
+  - 支持插件`Activity`通过隐式`action`进行调用 (#89)
+
+Performance:
+
+  - 插件签名解析加速 (#90)
+  - 插件manifest解析加速 (#91)
+
+Bugfixes:
+
+  - `bundle.json`定义的`rules`允许缺省`Activity`后缀 (#77)
+  - 修正`Activity`直接使用`getAssets()`方法时无法正确取得assets资源 (#80)
+  - 支持插件`Activity`的`screenOrientation`属性 (#86)
+  - 修正打开远程网页的崩溃问题
+
 ## 0.6.0 (2016-03-25)
 
 Features:
@@ -44,7 +158,6 @@ Refactors:
 
   - 插件清单文件更名为`bundle.json` (原`bundles.json`)
   - 优化`Small.setUp`API，减少监听回调
-  - 
 
 Bugfixes:
 

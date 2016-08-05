@@ -15,6 +15,7 @@
  */
 package net.wequick.gradle
 
+import com.android.build.gradle.tasks.ProcessAndroidResources
 import org.gradle.api.Project
 import org.gradle.api.Task
 
@@ -24,10 +25,13 @@ public class AndroidExtension extends BaseExtension {
     protected File outputFile
 
     /** Task of android packager */
-    Task aapt
+    ProcessAndroidResources aapt
 
     /** Task of R.class jar */
     Task jar
+
+    /** Tasks of aar exploder */
+    Set<File> explodeAarDirs
 
     AndroidExtension(Project project) {
         super(project)

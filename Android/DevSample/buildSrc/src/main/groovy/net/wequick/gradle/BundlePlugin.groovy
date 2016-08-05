@@ -15,6 +15,8 @@
  */
 package net.wequick.gradle
 
+import com.android.build.gradle.api.BaseVariant
+import com.android.build.gradle.internal.dsl.BuildType
 import org.gradle.api.Project
 
 /**
@@ -33,26 +35,37 @@ abstract class BundlePlugin extends AndroidPlugin {
 
     @Override
     protected BundleExtension getSmall() {
-        return super.getSmall()
+        return project.small
     }
 
     @Override
     protected void configureProject() {
         super.configureProject()
+
         project.afterEvaluate {
-            // Copy host signing configs
             if (isBuildingRelease()) {
-                Project hostProject = project.rootProject.findProject('app')
-                hostProject.android.buildTypes.each {
-                    def bt = project.android.buildTypes[it.name]
-                    bt.signingConfig = it.signingConfig
+                BuildType buildType = android.buildTypes.find { it.name == 'release' }
+
+                Project hostProject = rootSmall.hostProject
+                com.android.build.gradle.BaseExtension hostAndroid = hostProject.android
+                def hostDebugBuildType = hostAndroid.buildTypes.find { it.name == 'debug' }
+                def hostReleaseBuildType = hostAndroid.buildTypes.find { it.name == 'release' }
+
+                // Copy host signing configs
+                def sc = hostReleaseBuildType.signingConfig ?: hostDebugBuildType.signingConfig
+                buildType.setSigningConfig(sc)
+
+                // Enable minify if the command line defined `-Dbundle.minify=true'
+                def minify = System.properties['bundle.minify']
+                if (minify != null) {
+                    buildType.setMinifyEnabled(minify == 'true')
                 }
             }
         }
     }
 
     @Override
-    protected void configureReleaseVariant(variant) {
+    protected void configureReleaseVariant(BaseVariant variant) {
         super.configureReleaseVariant(variant)
 
         // Set output file (*.so)
@@ -75,54 +88,6 @@ abstract class BundlePlugin extends AndroidPlugin {
     @Override
     protected String getSmallCompileType() {
         return 'debugCompile'
-    }
-
-    /** Check if is building a module in release mode */
-    protected boolean isBuildingRelease() {
-        def sp = project.gradle.startParameter
-        def p = sp.projectDir
-        def t = sp.taskNames[0]
-        def pn = null
-
-        if (t == null) { // Nothing to do
-            return false
-        }
-
-        if (p == null) {
-            if (t.startsWith(':')) {
-                // gradlew :app.main:assembleRelease
-                def tArr = t.split(':')
-                if (tArr.length == 3) { // ['', 'app.main', 'assembleRelease']
-                    pn = tArr[1]
-                    t = tArr[2]
-                }
-            }
-        } else if (p != project.rootProject.projectDir) {
-            // gradlew -p [project.name] assembleRelease
-            pn = p.name
-        }
-
-        if (pn == null) {
-            // gradlew buildLibs | buildBundles
-            return small.type == PluginType.Library ?
-                    (t == 'buildLib') : (t == 'buildBundle')
-        } else {
-            return (pn == project.name && (t == 'assembleRelease' || t == 'aR'))
-        }
-    }
-
-    /** Check if is building any libs */
-    protected boolean isBuildingLibs() {
-        def sp = project.gradle.startParameter
-        def p = sp.projectDir
-        def t = sp.taskNames[0]
-        if (p == null || p == project.rootProject.projectDir) {
-            // ./gradlew buildLibs
-            return (t == 'buildLib')
-        } else {
-            // ./gradlew -p [lib.*] [task]
-            return (p.name.startsWith('lib.') && (t == 'assembleRelease' || t == 'aR'))
-        }
     }
 
     protected def getOutputFile(variant) {

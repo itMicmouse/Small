@@ -17,31 +17,47 @@
 package net.wequick.small;
 
 import android.app.Activity;
+import android.app.ActivityManager;
+import android.app.ActivityManager.RunningAppProcessInfo;
 import android.app.Application;
 import android.app.Instrumentation;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.ContextWrapper;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
 import android.content.res.AssetManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
+import android.content.res.TypedArray;
+import android.os.Handler;
 import android.os.IBinder;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
+import android.os.Message;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.Window;
 
+import net.wequick.small.internal.InstrumentationInternal;
 import net.wequick.small.util.ReflectAccelerator;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+
+import dalvik.system.DexFile;
 
 /**
  * This class launch the plugin activity by it's class name.
@@ -64,29 +80,59 @@ public class ApkBundleLauncher extends SoBundleLauncher {
 
     private static final String PACKAGE_NAME = ApkBundleLauncher.class.getPackage().getName();
     private static final String STUB_ACTIVITY_PREFIX = PACKAGE_NAME + ".A";
+    private static final String STUB_ACTIVITY_TRANSLUCENT = STUB_ACTIVITY_PREFIX + '1';
     private static final String TAG = "ApkBundleLauncher";
     private static final String FD_STORAGE = "storage";
-    private static final String FD_LIBRARY = "lib";
     private static final String FILE_DEX = "bundle.dex";
 
     private static class LoadedApk {
-        public String assetPath;
-        public int dexElementIndex;
-        public File dexFile;
-        public ActivityInfo[] activities;
+        public String packageName;
+        public File packagePath;
+        public String applicationName;
+        public String path;
+        public DexFile dexFile;
+        public File optDexFile;
+        public File libraryPath;
+        public boolean nonResources; /** no resources.arsc */
     }
 
     private static ConcurrentHashMap<String, LoadedApk> sLoadedApks;
     private static ConcurrentHashMap<String, ActivityInfo> sLoadedActivities;
+    private static ConcurrentHashMap<String, List<IntentFilter>> sLoadedIntentFilters;
 
     protected static Instrumentation sHostInstrumentation;
+
+    private static final char REDIRECT_FLAG = '>';
+
+    /**
+     * Class for restore activity info from Stub to Real
+     */
+    private static class ActivityThreadHandlerCallback implements Handler.Callback {
+
+        private static final int LAUNCH_ACTIVITY = 100;
+
+        @Override
+        public boolean handleMessage(Message msg) {
+            if (msg.what != LAUNCH_ACTIVITY) return false;
+
+            Object/*ActivityClientRecord*/ r = msg.obj;
+            Intent intent = ReflectAccelerator.getIntent(r);
+            String targetClass = unwrapIntent(intent);
+            if (targetClass == null) return false;
+
+            // Replace with the REAL activityInfo
+            ActivityInfo targetInfo = sLoadedActivities.get(targetClass);
+            ReflectAccelerator.setActivityInfo(r, targetInfo);
+            return false;
+        }
+    }
 
     /**
      * Class for redirect activity from Stub(AndroidManifest.xml) to Real(Plugin)
      */
-    private static class InstrumentationWrapper extends Instrumentation {
+    private static class InstrumentationWrapper extends Instrumentation
+            implements InstrumentationInternal {
 
-        private static final char REDIRECT_FLAG = '>';
         private static final int STUB_ACTIVITIES_COUNT = 4;
 
         public InstrumentationWrapper() { }
@@ -97,7 +143,7 @@ public class ApkBundleLauncher extends SoBundleLauncher {
                 Context who, IBinder contextThread, IBinder token, Activity target,
                 Intent intent, int requestCode, android.os.Bundle options) {
             wrapIntent(intent);
-            return ReflectAccelerator.execStartActivityV21(sHostInstrumentation,
+            return ReflectAccelerator.execStartActivity(sHostInstrumentation,
                     who, contextThread, token, target, intent, requestCode, options);
         }
 
@@ -107,21 +153,8 @@ public class ApkBundleLauncher extends SoBundleLauncher {
                 Context who, IBinder contextThread, IBinder token, Activity target,
                 Intent intent, int requestCode) {
             wrapIntent(intent);
-            return ReflectAccelerator.execStartActivityV20(sHostInstrumentation,
+            return ReflectAccelerator.execStartActivity(sHostInstrumentation,
                     who, contextThread, token, target, intent, requestCode);
-        }
-
-        @Override
-        /** Unwrap activity from STUB to REAL */
-        public Activity newActivity(ClassLoader cl, String className, Intent intent)
-                throws InstantiationException, IllegalAccessException, ClassNotFoundException {
-            // Stub -> Real
-            if (!className.startsWith(STUB_ACTIVITY_PREFIX)) {
-                return super.newActivity(cl, className, intent);
-            }
-            className = unwrapIntent(intent, className);
-            Activity activity = super.newActivity(cl, className, intent);
-            return activity;
         }
 
         @Override
@@ -132,10 +165,51 @@ public class ApkBundleLauncher extends SoBundleLauncher {
                 ActivityInfo ai = sLoadedActivities.get(activity.getClass().getName());
                 if (ai == null) break;
 
-                ensureAddAssetPath(activity);
                 applyActivityInfo(activity, ai);
             } while (false);
-            super.callActivityOnCreate(activity, icicle);
+            sHostInstrumentation.callActivityOnCreate(activity, icicle);
+        }
+
+        @Override
+        public void callActivityOnStop(Activity activity) {
+            sHostInstrumentation.callActivityOnStop(activity);
+
+            if (!Small.isUpgrading()) return;
+
+            // If is upgrading, we are going to kill self while application turn into background,
+            // and while we are back to foreground, all the things(code & layout) will be reload.
+            // Don't worry about the data missing in current activity, you can do all the backups
+            // with your activity's `onSaveInstanceState' and `onRestoreInstanceState'.
+            ActivityManager am = (ActivityManager) activity.getSystemService(Context.ACTIVITY_SERVICE);
+            List<RunningAppProcessInfo> processes = am.getRunningAppProcesses();
+            if (processes == null) return;
+
+            String pkg = activity.getApplicationContext().getPackageName();
+            ActivityManager.RunningAppProcessInfo self = null;
+            for (ActivityManager.RunningAppProcessInfo p : processes) {
+                if (p.processName.equals(pkg)) {
+                    self = p;
+                    break;
+                }
+            }
+            if (self == null) return;
+            if (self.importance == RunningAppProcessInfo.IMPORTANCE_FOREGROUND) return;
+
+            final int pid = self.pid;
+            // Seems should delay some time to ensure the activity can be successfully
+            // restarted after the application restart.
+            // FIXME: remove following thread if you find the better place to `killProcess'
+            new Thread() {
+                @Override
+                public void run() {
+                    try {
+                        sleep(300);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    android.os.Process.killProcess(pid);
+                }
+            }.start();
         }
 
         @Override
@@ -147,14 +221,23 @@ public class ApkBundleLauncher extends SoBundleLauncher {
                 if (ai == null) break;
                 inqueueStubActivity(ai, realClazz);
             } while (false);
-            super.callActivityOnDestroy(activity);
+            sHostInstrumentation.callActivityOnDestroy(activity);
         }
 
         private void wrapIntent(Intent intent) {
             ComponentName component = intent.getComponent();
-            if (component == null) return; // ignore system intent
+            String realClazz;
+            if (component == null) {
+                // Implicit way to start an activity
+                component = intent.resolveActivity(Small.getContext().getPackageManager());
+                if (component != null) return; // ignore system or host action
 
-            String realClazz = intent.getComponent().getClassName();
+                realClazz = resolveActivity(intent);
+                if (realClazz == null) return;
+            } else {
+                realClazz = component.getClassName();
+            }
+
             if (sLoadedActivities == null) return;
 
             ActivityInfo ai = sLoadedActivities.get(realClazz);
@@ -166,22 +249,28 @@ public class ApkBundleLauncher extends SoBundleLauncher {
             intent.setComponent(new ComponentName(Small.getContext(), stubClazz));
         }
 
-        private String unwrapIntent(Intent intent, String className) {
-            Set<String> categories = intent.getCategories();
-            if (categories == null) return className;
+        private String resolveActivity(Intent intent) {
+            if (sLoadedIntentFilters == null) return null;
 
-            // Get plugin activity class name from categories
-            Iterator<String> it = categories.iterator();
-            String realClazz = null;
+            Iterator<Map.Entry<String, List<IntentFilter>>> it =
+                    sLoadedIntentFilters.entrySet().iterator();
             while (it.hasNext()) {
-                String category = it.next();
-                if (category.charAt(0) == REDIRECT_FLAG) {
-                    realClazz = category.substring(1);
-                    break;
+                Map.Entry<String, List<IntentFilter>> entry = it.next();
+                List<IntentFilter> filters = entry.getValue();
+                for (IntentFilter filter : filters) {
+                    if (filter.hasAction(Intent.ACTION_VIEW)) {
+                        // TODO: match uri
+                    }
+                    if (filter.hasCategory(Intent.CATEGORY_DEFAULT)) {
+                        // custom action
+                        if (filter.hasAction(intent.getAction())) {
+                            // hit
+                            return entry.getKey();
+                        }
+                    }
                 }
             }
-            if (realClazz == null) return className;
-            return realClazz;
+            return null;
         }
 
         private String[] mStubQueue;
@@ -190,7 +279,15 @@ public class ApkBundleLauncher extends SoBundleLauncher {
         private String dequeueStubActivity(ActivityInfo ai, String realActivityClazz) {
             if (ai.launchMode == ActivityInfo.LAUNCH_MULTIPLE) {
                 // In standard mode, the stub activity is reusable.
-                return STUB_ACTIVITY_PREFIX;
+                // Cause the `windowIsTranslucent' attribute cannot be dynamically set,
+                // We should choose the STUB activity with translucent or not here.
+                Resources.Theme theme = Small.getContext().getResources().newTheme();
+                theme.applyStyle(ai.getThemeResource(), true);
+                TypedArray sa = theme.obtainStyledAttributes(
+                        new int[] { android.R.attr.windowIsTranslucent });
+                boolean translucent = sa.getBoolean(0, false);
+                sa.recycle();
+                return translucent ? STUB_ACTIVITY_TRANSLUCENT : STUB_ACTIVITY_PREFIX;
             }
 
             int availableId = -1;
@@ -238,15 +335,60 @@ public class ApkBundleLauncher extends SoBundleLauncher {
         }
     }
 
+    private static String unwrapIntent(Intent intent) {
+        Set<String> categories = intent.getCategories();
+        if (categories == null) return null;
+
+        // Get plugin activity class name from categories
+        Iterator<String> it = categories.iterator();
+        while (it.hasNext()) {
+            String category = it.next();
+            if (category.charAt(0) == REDIRECT_FLAG) {
+                return category.substring(1);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * A context wrapper that redirect some host environments to plugin
+     */
+    private static final class BundleApplicationContext extends ContextWrapper {
+
+        private LoadedApk mApk;
+
+        public BundleApplicationContext(Context base, LoadedApk apk) {
+            super(base);
+            mApk = apk;
+        }
+
+        @Override
+        public String getPackageName() {
+            return mApk.packageName;
+        }
+
+        @Override
+        public String getPackageResourcePath() {
+            return mApk.path;
+        }
+
+        @Override
+        public ApplicationInfo getApplicationInfo() {
+            ApplicationInfo ai = super.getApplicationInfo();
+            // TODO: Read meta-data in bundles and merge to the host one
+            // ai.metaData.putAll();
+            return ai;
+        }
+    }
+
     @Override
     public void setUp(Context context) {
         super.setUp(context);
-        // Inject instrumentation
         if (sHostInstrumentation == null) {
             try {
+                // Inject instrumentation
                 final Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
-                final Method method = activityThreadClass.getMethod("currentActivityThread");
-                Object thread = method.invoke(null, (Object[]) null);
+                Object thread = ReflectAccelerator.getActivityThread(context, activityThreadClass);
                 Field field = activityThreadClass.getDeclaredField("mInstrumentation");
                 field.setAccessible(true);
                 sHostInstrumentation = (Instrumentation) field.get(thread);
@@ -258,6 +400,14 @@ public class ApkBundleLauncher extends SoBundleLauncher {
                     field.setAccessible(true);
                     field.set(context, wrapper);
                 }
+
+                // Inject handler
+                field = activityThreadClass.getDeclaredField("mH");
+                field.setAccessible(true);
+                Handler ah = (Handler) field.get(thread);
+                field = Handler.class.getDeclaredField("mCallback");
+                field.setAccessible(true);
+                field.set(ah, new ActivityThreadHandlerCallback());
             } catch (Exception ignored) {
                 ignored.printStackTrace();
                 // Usually, cannot reach here
@@ -266,109 +416,149 @@ public class ApkBundleLauncher extends SoBundleLauncher {
     }
 
     @Override
+    public void postSetUp() {
+        super.postSetUp();
+
+        if (sLoadedApks == null) {
+            Log.e(TAG, "Could not find any APK bundles!");
+            return;
+        }
+
+        Collection<LoadedApk> apks = sLoadedApks.values();
+
+        // Merge all the resources in bundles and replace the host one
+        final Application app = Small.getContext();
+        String[] paths = new String[apks.size() + 1];
+        paths[0] = app.getPackageResourcePath(); // add host asset path
+        int i = 1;
+        for (LoadedApk apk : apks) {
+            if (apk.nonResources) continue; // ignores the empty entry to fix #62
+            paths[i++] = apk.path; // add plugin asset path
+        }
+        if (i != paths.length) {
+            paths = Arrays.copyOf(paths, i);
+        }
+        ReflectAccelerator.mergeResources(app, paths);
+
+        // Merge all the dex into host's class loader
+        ClassLoader cl = app.getClassLoader();
+        i = 0;
+        int N = apks.size();
+        String[] dexPaths = new String[N];
+        DexFile[] dexFiles = new DexFile[N];
+        for (LoadedApk apk : apks) {
+            dexPaths[i] = apk.path;
+            dexFiles[i] = apk.dexFile;
+            if (Small.getBundleUpgraded(apk.packageName)) {
+                // If upgraded, delete the opt dex file for recreating
+                if (apk.optDexFile.exists()) apk.optDexFile.delete();
+                Small.setBundleUpgraded(apk.packageName, false);
+            }
+            i++;
+        }
+        ReflectAccelerator.expandDexPathList(cl, dexPaths, dexFiles);
+
+        // Expand the native library directories for host class loader if plugin has any JNIs. (#79)
+        List<File> libPathList = new ArrayList<File>();
+        for (LoadedApk apk : apks) {
+            if (apk.libraryPath != null) {
+                libPathList.add(apk.libraryPath);
+            }
+        }
+        if (libPathList.size() > 0) {
+            ReflectAccelerator.expandNativeLibraryDirectories(cl, libPathList);
+        }
+
+        // Trigger all the bundle application `onCreate' event
+        for (final LoadedApk apk : apks) {
+            String bundleApplicationName = apk.applicationName;
+            if (bundleApplicationName == null) continue;
+
+            try {
+                final Class applicationClass = Class.forName(bundleApplicationName);
+                Bundle.postUI(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            BundleApplicationContext appContext = new BundleApplicationContext(app, apk);
+                            Application bundleApplication = Instrumentation.newApplication(
+                                    applicationClass, appContext);
+                            sHostInstrumentation.callApplicationOnCreate(bundleApplication);
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+
+        // Free temporary variables
+        sLoadedApks = null;
+    }
+
+    @Override
     protected String[] getSupportingTypes() {
         return new String[] {"app", "lib"};
     }
 
-    private void unloadBundle(String packageName) {
-        if (sLoadedApks == null) return;
-        LoadedApk apk = sLoadedApks.get(packageName);
-        if (apk == null) return;
+    @Override
+    public File getExtractPath(Bundle bundle) {
+        Context context = Small.getContext();
+        File packagePath = context.getFileStreamPath(FD_STORAGE);
+        return new File(packagePath, bundle.getPackageName());
+    }
 
-        if (sLoadedActivities != null && apk.activities != null) {
-            for (ActivityInfo ai : apk.activities) {
-                sLoadedActivities.remove(ai.name);
-            }
-        }
-        sLoadedApks.remove(packageName);
+    @Override
+    public File getExtractFile(Bundle bundle, String entryName) {
+        if (!entryName.endsWith(".so")) return null;
 
-        // Remove asset path from application (Reset resources merger)
-        Context appContext = ((ContextWrapper) Small.getContext()).getBaseContext();
-        ResourcesMerger rm = ResourcesMerger.merge(appContext);
-        ReflectAccelerator.setResources(appContext, rm);
-        // TODO: Remove asset path from launching activities
-
-        // Remove dexElement from ClassLoader?
-        for (LoadedApk a : sLoadedApks.values()) {
-            if (a.dexElementIndex > apk.dexElementIndex) a.dexElementIndex--;
-        }
-        ReflectAccelerator.removeDexPathList(
-                appContext.getClassLoader(), apk.dexElementIndex);
-        if (apk.dexFile.exists()) apk.dexFile.delete();
+        return new File(bundle.getExtractPath(), entryName);
     }
 
     @Override
     public void loadBundle(Bundle bundle) {
-        boolean patching = bundle.isPatching();
         String packageName = bundle.getPackageName();
-        File plugin = bundle.getBuiltinFile();
-        PackageManager pm = Small.getContext().getPackageManager();
-        PackageInfo pluginInfo = pm.getPackageArchiveInfo(plugin.getPath(),
-                PackageManager.GET_ACTIVITIES);
 
-        File patch = bundle.getPatchFile();
-        if (patch.exists()) {
-            PackageInfo patchInfo = pm.getPackageArchiveInfo(patch.getPath(),
-                    PackageManager.GET_ACTIVITIES);
-            if (patchInfo.versionCode < pluginInfo.versionCode) {
-                Log.d(TAG, "Patch file should be later than built-in!");
-                patch.delete();
-            } else {
-                plugin = patch;
-                pluginInfo = patchInfo;
-            }
-        }
-
-        if (patching) {
-            // Unload bundle of the package name
-            unloadBundle(packageName);
-        }
+        BundleParser parser = bundle.getParser();
+        parser.collectActivities();
+        PackageInfo pluginInfo = parser.getPackageInfo();
 
         // Load the bundle
-        String apkPath = plugin.getPath();
+        String apkPath = parser.getSourcePath();
         if (sLoadedApks == null) sLoadedApks = new ConcurrentHashMap<String, LoadedApk>();
         LoadedApk apk = sLoadedApks.get(packageName);
         if (apk == null) {
             apk = new LoadedApk();
-            apk.assetPath = apkPath;
-            apk.dexElementIndex = 0; // insert to header
-            apk.activities = pluginInfo.activities;
-
-            // Add dex element to class loader's pathList
-            Context context = Small.getContext();
-            File packagePath = context.getFileStreamPath(FD_STORAGE);
-            packagePath = new File(packagePath, packageName);
-            if (!packagePath.exists()) {
-                packagePath.mkdirs();
+            apk.packageName = packageName;
+            apk.path = apkPath;
+            apk.nonResources = parser.isNonResources();
+            if (pluginInfo.applicationInfo != null) {
+                apk.applicationName = pluginInfo.applicationInfo.className;
             }
-            File libDir = new File(packagePath, FD_LIBRARY);
-            File optDexFile = new File(packagePath, FILE_DEX);
+            apk.packagePath = bundle.getExtractPath();
+            apk.optDexFile = new File(apk.packagePath, FILE_DEX);
 
-            // Going to insert dexElement to header, so increase the index of the others
-            for (LoadedApk a : sLoadedApks.values()) a.dexElementIndex++;
-            if (Small.getBundleUpgraded(packageName)) {
-                // If upgraded, delete the opt dex file for recreating
-                if (optDexFile.exists()) optDexFile.delete();
-                Small.setBundleUpgraded(packageName, false);
+            // Load dex
+            final LoadedApk fApk = apk;
+            Bundle.postIO(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        fApk.dexFile = DexFile.loadDex(fApk.path, fApk.optDexFile.getPath(), 0);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            });
+
+            // Extract native libraries with specify ABI
+            String libDir = parser.getLibraryDirectory();
+            if (libDir != null) {
+                apk.libraryPath = new File(apk.packagePath, libDir);
             }
-            ReflectAccelerator.expandDexPathList(
-                    context.getClassLoader(), apkPath, libDir.getPath(), optDexFile.getPath());
-
-            apk.dexFile = optDexFile;
             sLoadedApks.put(packageName, apk);
-        }
-
-        // Call bundle application onCreate
-        String bundleApplicationName = pluginInfo.applicationInfo.className;
-        if (bundleApplicationName != null) {
-            try {
-                Class applicationClass = Class.forName(bundleApplicationName);
-                Application bundleApplication = Instrumentation.newApplication(
-                        applicationClass, Small.getContext());
-                sHostInstrumentation.callApplicationOnCreate(bundleApplication);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
         }
 
         if (pluginInfo.activities == null) {
@@ -377,11 +567,22 @@ public class ApkBundleLauncher extends SoBundleLauncher {
         }
 
         // Record activities for intent redirection
-        bundle.setEntrance(pluginInfo.activities[0].name);
         if (sLoadedActivities == null) sLoadedActivities = new ConcurrentHashMap<String, ActivityInfo>();
         for (ActivityInfo ai : pluginInfo.activities) {
             sLoadedActivities.put(ai.name, ai);
         }
+
+        // Record intent-filters for implicit action
+        ConcurrentHashMap<String, List<IntentFilter>> filters = parser.getIntentFilters();
+        if (filters != null) {
+            if (sLoadedIntentFilters == null) {
+                sLoadedIntentFilters = new ConcurrentHashMap<String, List<IntentFilter>>();
+            }
+            sLoadedIntentFilters.putAll(filters);
+        }
+
+        // Set entrance activity
+        bundle.setEntrance(parser.getDefaultActivityName());
     }
 
     @Override
@@ -389,28 +590,27 @@ public class ApkBundleLauncher extends SoBundleLauncher {
         super.prelaunchBundle(bundle);
         Intent intent = new Intent();
         bundle.setIntent(intent);
+
         // Intent extras - class
-        String activityName = bundle.getPath();
-        if (activityName == null || activityName.equals("")) {
-            activityName = bundle.getEntrance();
-        } else if (activityName.startsWith(".")) {
-            activityName = bundle.getPackageName() + activityName;
-        }
-        if (!sLoadedActivities.containsKey(activityName)) {
-            if (!activityName.endsWith("Activity")) {
-                throw new ActivityNotFoundException("Unable to find explicit activity class { " +
-                        activityName + " }");
-            }
+        String activityName = bundle.getActivityName();
+        if (!ActivityLauncher.containsActivity(activityName)) {
+            if (!sLoadedActivities.containsKey(activityName)) {
+                if (activityName.endsWith("Activity")) {
+                    throw new ActivityNotFoundException("Unable to find explicit activity class " +
+                            "{ " + activityName + " }");
+                }
 
-            String tempActivityName = activityName + "Activity";
-            if (!sLoadedActivities.containsKey(tempActivityName)) {
-                throw new ActivityNotFoundException("Unable to find explicit activity class { " +
-                        activityName + " or " + tempActivityName + " }");
-            }
+                String tempActivityName = activityName + "Activity";
+                if (!sLoadedActivities.containsKey(tempActivityName)) {
+                    throw new ActivityNotFoundException("Unable to find explicit activity class " +
+                            "{ " + activityName + "(Activity) }");
+                }
 
-            activityName = tempActivityName;
+                activityName = tempActivityName;
+            }
         }
         intent.setComponent(new ComponentName(Small.getContext(), activityName));
+
         // Intent extras - params
         String query = bundle.getQuery();
         if (query != null) {
@@ -441,7 +641,6 @@ public class ApkBundleLauncher extends SoBundleLauncher {
                 // TODO: check package name
                 assert false;
             }
-            ensureAddAssetPath((Activity) context);
             if (type.endsWith("v4")) {
                 return (T) android.support.v4.app.Fragment.instantiate(context, fname);
             }
@@ -456,51 +655,9 @@ public class ApkBundleLauncher extends SoBundleLauncher {
      * @param ai
      */
     private static void applyActivityInfo(Activity activity, ActivityInfo ai) {
-        // Apply plugin theme
-        ReflectAccelerator.setTheme(activity, null);
-        activity.setTheme(ai.getThemeResource());
-        // Apply plugin softInputMode
-        activity.getWindow().setSoftInputMode(ai.softInputMode);
-    }
-
-    /**
-     * Try to get plugin resource, if failed, add plugin asset path
-     * @param activity
-     */
-    private static void ensureAddAssetPath(Activity activity) {
-        Context appBase = activity.getApplication().getBaseContext();
-        Resources appRes = appBase.getResources();
-        Resources activityRes = activity.getResources();
-        if (appRes instanceof ResourcesMerger) {
-            // Synchronize resources from application
-            if (!activityRes.equals(appRes)) ReflectAccelerator.setResources(activity, appRes);
-        } else {
-            // Replace resources for application and activity
-            ResourcesMerger rm = ResourcesMerger.merge(activity.getBaseContext());
-            ReflectAccelerator.setResources(activity.getApplication(), rm);
-            ReflectAccelerator.setResources(activity, rm);
-        }
-    }
-
-    private static class ResourcesMerger extends Resources {
-        public ResourcesMerger(AssetManager assets,
-                               DisplayMetrics metrics, Configuration config) {
-            super(assets, metrics, config);
-        }
-
-        public static ResourcesMerger merge(Context context) {
-            AssetManager assets = ReflectAccelerator.newAssetManager();
-
-            // Add plugin asset paths
-            for (LoadedApk apk : sLoadedApks.values()){
-                ReflectAccelerator.addAssetPath(assets, apk.assetPath);
-            }
-            // Add host asset path
-            ReflectAccelerator.addAssetPath(assets, context.getPackageResourcePath());
-
-            Resources base = context.getResources();
-            return new ResourcesMerger(assets,
-                    base.getDisplayMetrics(), base.getConfiguration());
-        }
+        // Apply window attributes
+        Window window = activity.getWindow();
+        window.setSoftInputMode(ai.softInputMode);
+        activity.setRequestedOrientation(ai.screenOrientation);
     }
 }

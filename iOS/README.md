@@ -1,10 +1,41 @@
 # Small iOS
 
+## Getting Started
+
+ 1. 导入模板
+   ```bash
+   git clone https://github.com/wequick/Small.git
+   cd Small/iOS
+   cp -r Templates ~/Library/Developer/Xcode/Templates
+   ```
+   重启Xcode
+   
+ 2. 新建工程
+    File->New->Project...，选择Small-pods模板
+
+    ![Small iOS Template][small-template]
+
+ 3. 安装Pods
+    ```bash
+    cd [your-project-path]
+    pod install --no-repo-update
+    ```
+    
+ 4. 关闭工程并打开xcworkspace
+    ```bash
+    open *.xcworkspace
+    ```
+  
 ## Examples
 
-* 使用者模式Sample(暂不可用)
+* 使用者模式[Sample](Sample)
+
+  > 需要先编译Pods
+
 * 开发者模式[DevSample](DevSample)
 
+  > 需要去除并行编译模式：Edit Scheme...->Build->Build Options-> [ ] Parallelize Build
+  
 > 各个组件需要签名后才支持代码级别更新。示例中更新例子为xib内容更新。<br/>
 > 在没有设置签名之前，请在模拟器上跑示例。
 
@@ -44,3 +75,4 @@ QQ群链接无法使用的手动加 **78374636**
 Apache License 2.0
 
 [gitter]: https://gitter.im/wequick/Small
+[small-template]: http://code.wequick.net/assets/images/small-ios-template.png

@@ -21,21 +21,27 @@ import android.app.Application;
 import android.app.Instrumentation;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.content.pm.Signature;
+import android.content.pm.ActivityInfo;
 import android.content.res.AssetManager;
+import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.IBinder;
-import android.support.v7.app.AppCompatActivity;
+import android.util.ArrayMap;
 import android.util.DisplayMetrics;
-import android.view.ContextThemeWrapper;
 
 import java.io.File;
+import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.zip.ZipFile;
 
 import dalvik.system.DexClassLoader;
@@ -46,89 +52,29 @@ import dalvik.system.DexFile;
  */
 public class ReflectAccelerator {
     // AssetManager.addAssetPath
-    private static Method sAddAssetPath;
-    // DexPathList
-    private static Constructor sDexElementConstructor;
-    private static Class sDexElementClass;
-    private static Field sPathListField;
-    private static Field sDexElementsField;
-    // ApplicationInfo.resourceDirs
-    private static Field sContextThemeWrapper_mTheme_field;
-    private static Field sContextThemeWrapper_mResources_field;
-    private static Field sContextImpl_mResources_field;
-    private static Field sActivity_mMainThread_field;
-    private static Method sActivityThread_currentActivityThread_method;
-    private static Method sInstrumentation_execStartActivityV21_method;
-    private static Method sInstrumentation_execStartActivityV20_method;
-    // Signatures - V13
-    private static Constructor sPackageParser_constructor;
-    private static Method sPackageParser_parsePackage_method;
-    private static Method sPackageParser_collectCertificates_method;
-    private static Field sPackageParser$Package_mSignatures_field;
-    // DexClassLoader - V13
-    private static Field sDexClassLoader_mFiles_field;
-    private static Field sDexClassLoader_mPaths_field;
-    private static Field sDexClassLoader_mZips_field;
-    private static Field sDexClassLoader_mDexs_field;
-    // AppCompatActivity - 23.2+
-    private static Field sAppCompatActivity_mResources_field;
-    private static boolean sAppCompatActivityHasNoResourcesField;
+    private static Method sAssetManager_addAssetPath_method;
+    private static Method sAssetManager_addAssetPaths_method;
+    // ActivityClientRecord
+    private static Field sActivityClientRecord_intent_field;
+    private static Field sActivityClientRecord_activityInfo_field;
 
     private ReflectAccelerator() { /** cannot be instantiated */ }
 
-    //______________________________________________________________________________________________
-    // API
+    private static final class V9_13 {
 
-    public static int addAssetPath(AssetManager assets, String path) {
-        if (sAddAssetPath == null) {
-            sAddAssetPath = getMethod(AssetManager.class,
-                    "addAssetPath", new Class[]{String.class});
-        }
-        if (sAddAssetPath == null) return 0;
-        Integer ret = invoke(sAddAssetPath, assets, path);
-        if (ret == null) return 0;
-        return ret;
-    }
+        private static Field sDexClassLoader_mFiles_field;
+        private static Field sDexClassLoader_mPaths_field;
+        private static Field sDexClassLoader_mZips_field;
+        private static Field sDexClassLoader_mDexs_field;
+        private static Field sPathClassLoader_libraryPathElements_field;
 
-    //______________________________________________________________________________________________
-    // Dex path list
-
-    /**
-     * Make dex element
-     * @see <a href="https://android.googlesource.com/platform/libcore-snapshot/+/ics-mr1/dalvik/src/main/java/dalvik/system/DexPathList.java">DexPathList.java</a>
-     * @param pkg archive android package with any file extensions
-     * @param dexFile
-     * @return dalvik.system.DexPathList$Element
-     */
-    private static Object makeDexElement(File pkg, DexFile dexFile) throws Exception {
-        if (sDexElementClass == null) {
-            sDexElementClass = Class.forName("dalvik.system.DexPathList$Element");
-        }
-        if (sDexElementConstructor == null) {
-            sDexElementConstructor = sDexElementClass.getConstructors()[0];
-        }
-        Class<?>[] types = sDexElementConstructor.getParameterTypes();
-        switch (types.length) {
-            case 3:
-                if (types[1].equals(ZipFile.class)) {
-                    // Element(File apk, ZipFile zip, DexFile dex)
-                    ZipFile zip = new ZipFile(pkg);
-                    return sDexElementConstructor.newInstance(pkg, zip, dexFile);
-                } else {
-                    // Element(File apk, File zip, DexFile dex)
-                    return sDexElementConstructor.newInstance(pkg, pkg, dexFile);
-                }
-            case 4:
-            default:
-                // Element(File apk, boolean isDir, File zip, DexFile dex)
-                return sDexElementConstructor.newInstance(pkg, false, pkg, dexFile);
-        }
-    }
-
-    public static boolean expandDexPathList(ClassLoader cl, String dexPath,
-                                     String libraryPath, String optDexPath) {
-        if (Build.VERSION.SDK_INT < 14) {
+        public static boolean expandDexPathList(ClassLoader cl,
+                                                String[] dexPaths, DexFile[] dexFiles) {
+            ZipFile[] zips = null;
             try {
+            /*
+             * see https://android.googlesource.com/platform/libcore/+/android-2.3_r1/dalvik/src/main/java/dalvik/system/DexClassLoader.java
+             */
                 if (sDexClassLoader_mFiles_field == null) {
                     sDexClassLoader_mFiles_field = getDeclaredField(cl.getClass(), "mFiles");
                     sDexClassLoader_mPaths_field = getDeclaredField(cl.getClass(), "mPaths");
@@ -141,33 +87,460 @@ public class ReflectAccelerator {
                         || sDexClassLoader_mDexs_field == null) {
                     return false;
                 }
-                
-                File pathFile = new File(dexPath);
-                expandArray(cl, sDexClassLoader_mFiles_field, new Object[]{pathFile}, true);
 
-                expandArray(cl, sDexClassLoader_mPaths_field, new Object[]{dexPath}, true);
+                int N = dexPaths.length;
+                Object[] files = new Object[N];
+                Object[] paths = new Object[N];
+                zips = new ZipFile[N];
+                for (int i = 0; i < N; i++) {
+                    String path = dexPaths[i];
+                    files[i] = new File(path);
+                    paths[i] = path;
+                    zips[i] = new ZipFile(path);
+                }
 
-                ZipFile zipFile = new ZipFile(dexPath);
-                expandArray(cl, sDexClassLoader_mZips_field, new Object[]{zipFile}, true);
-
-                DexFile dexFile = DexFile.loadDex(dexPath, optDexPath, 0);
-                expandArray(cl, sDexClassLoader_mDexs_field, new Object[]{dexFile}, true);
+                expandArray(cl, sDexClassLoader_mFiles_field, files, true);
+                expandArray(cl, sDexClassLoader_mPaths_field, paths, true);
+                expandArray(cl, sDexClassLoader_mZips_field, zips, true);
+                expandArray(cl, sDexClassLoader_mDexs_field, dexFiles, true);
             } catch (Exception e) {
+                e.printStackTrace();
+                if (zips != null) {
+                    for (ZipFile zipFile : zips) {
+                        try {
+                            zipFile.close();
+                        } catch (IOException e1) {
+                            e1.printStackTrace();
+                        }
+                    }
+                }
                 return false;
             }
-        } else {
+            return true;
+        }
+
+        public static void expandNativeLibraryDirectories(ClassLoader classLoader,
+                                                          List<File> libPaths) {
+            if (sPathClassLoader_libraryPathElements_field == null) {
+                sPathClassLoader_libraryPathElements_field = getDeclaredField(
+                        classLoader.getClass(), "libraryPathElements");
+            }
+            List<String> paths = getValue(sPathClassLoader_libraryPathElements_field, classLoader);
+            if (paths == null) return;
+            for (File libPath : libPaths) {
+                paths.add(libPath.getAbsolutePath() + File.separator);
+            }
+        }
+    }
+
+    private static class V14_ { // API 14 and upper
+
+        // DexPathList
+        protected static Field sPathListField;
+        private static Constructor sDexElementConstructor;
+        private static Class sDexElementClass;
+        private static Field sDexElementsField;
+
+        public static boolean expandDexPathList(ClassLoader cl,
+                                                String[] dexPaths, DexFile[] dexFiles) {
             try {
-                File pkg = new File(dexPath);
-                DexFile dexFile = DexFile.loadDex(dexPath, optDexPath, 0);
-                Object element = makeDexElement(pkg, dexFile);
-                fillDexPathList(cl, element);
+                int N = dexPaths.length;
+                Object[] elements = new Object[N];
+                for (int i = 0; i < N; i++) {
+                    String dexPath = dexPaths[i];
+                    File pkg = new File(dexPath);
+                    DexFile dexFile = dexFiles[i];
+                    elements[i] = makeDexElement(pkg, dexFile);
+                }
+
+                fillDexPathList(cl, elements);
             } catch (Exception e) {
                 e.printStackTrace();
                 return false;
             }
+            return true;
         }
-        return true;
+
+        /**
+         * Make dex element
+         * @see <a href="https://android.googlesource.com/platform/libcore-snapshot/+/ics-mr1/dalvik/src/main/java/dalvik/system/DexPathList.java">DexPathList.java</a>
+         * @param pkg archive android package with any file extensions
+         * @param dexFile
+         * @return dalvik.system.DexPathList$Element
+         */
+        private static Object makeDexElement(File pkg, DexFile dexFile) throws Exception {
+            return makeDexElement(pkg, false, dexFile);
+        }
+
+        protected static Object makeDexElement(File dir) throws Exception {
+            return makeDexElement(dir, true, null);
+        }
+
+        private static Object makeDexElement(File pkg, boolean isDirectory, DexFile dexFile) throws Exception {
+            if (sDexElementClass == null) {
+                sDexElementClass = Class.forName("dalvik.system.DexPathList$Element");
+            }
+            if (sDexElementConstructor == null) {
+                sDexElementConstructor = sDexElementClass.getConstructors()[0];
+            }
+            Class<?>[] types = sDexElementConstructor.getParameterTypes();
+            switch (types.length) {
+                case 3:
+                    if (types[1].equals(ZipFile.class)) {
+                        // Element(File apk, ZipFile zip, DexFile dex)
+                        ZipFile zip;
+                        try {
+                            zip = new ZipFile(pkg);
+                        } catch (IOException e) {
+                            throw e;
+                        }
+                        try {
+                            return sDexElementConstructor.newInstance(pkg, zip, dexFile);
+                        } catch (Exception e) {
+                            zip.close();
+                            throw e;
+                        }
+                    } else {
+                        // Element(File apk, File zip, DexFile dex)
+                        return sDexElementConstructor.newInstance(pkg, pkg, dexFile);
+                    }
+                case 4:
+                default:
+                    // Element(File apk, boolean isDir, File zip, DexFile dex)
+                    if (isDirectory) {
+                        return sDexElementConstructor.newInstance(pkg, true, null, null);
+                    } else {
+                        return sDexElementConstructor.newInstance(pkg, false, pkg, dexFile);
+                    }
+            }
+        }
+
+        private static void fillDexPathList(ClassLoader cl, Object[] elements)
+                throws NoSuchFieldException, IllegalAccessException {
+            if (sPathListField == null) {
+                sPathListField = getDeclaredField(DexClassLoader.class.getSuperclass(), "pathList");
+            }
+            Object pathList = sPathListField.get(cl);
+            if (sDexElementsField == null) {
+                sDexElementsField = getDeclaredField(pathList.getClass(), "dexElements");
+            }
+            expandArray(pathList, sDexElementsField, elements, true);
+        }
+
+        public static void removeDexPathList(ClassLoader cl, int deleteIndex) {
+            try {
+                if (sPathListField == null) {
+                    sPathListField = getDeclaredField(DexClassLoader.class.getSuperclass(), "pathList");
+                }
+                Object pathList = sPathListField.get(cl);
+                if (sDexElementsField == null) {
+                    sDexElementsField = getDeclaredField(pathList.getClass(), "dexElements");
+                }
+                sliceArray(pathList, sDexElementsField, deleteIndex);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
     }
+
+    private static final class V9_20 {
+
+        private static Method sInstrumentation_execStartActivityV20_method;
+
+        public static Instrumentation.ActivityResult execStartActivity(
+                Instrumentation instrumentation, Context who, IBinder contextThread, IBinder token,
+                Activity target, Intent intent, int requestCode) {
+            if (sInstrumentation_execStartActivityV20_method == null) {
+                Class[] types = new Class[] {Context.class, IBinder.class, IBinder.class,
+                        Activity.class, Intent.class, int.class};
+                sInstrumentation_execStartActivityV20_method = getMethod(Instrumentation.class,
+                        "execStartActivity", types);
+            }
+            if (sInstrumentation_execStartActivityV20_method == null) return null;
+            return invoke(sInstrumentation_execStartActivityV20_method, instrumentation,
+                    who, contextThread, token, target, intent, requestCode);
+        }
+    }
+
+    private static final class V21_ {
+
+        private static Method sInstrumentation_execStartActivityV21_method;
+
+        public static Instrumentation.ActivityResult execStartActivity(
+                Instrumentation instrumentation, Context who, IBinder contextThread, IBinder token,
+                Activity target, Intent intent, int requestCode, Bundle options) {
+            if (sInstrumentation_execStartActivityV21_method == null) {
+                Class[] types = new Class[] {Context.class, IBinder.class, IBinder.class,
+                        Activity.class, Intent.class, int.class, android.os.Bundle.class};
+                sInstrumentation_execStartActivityV21_method = getMethod(Instrumentation.class,
+                        "execStartActivity", types);
+            }
+            if (sInstrumentation_execStartActivityV21_method == null) return null;
+            return invoke(sInstrumentation_execStartActivityV21_method, instrumentation,
+                    who, contextThread, token, target, intent, requestCode, options);
+        }
+    }
+
+    private static class V14_22 extends V14_ {
+
+        protected static Field sDexPathList_nativeLibraryDirectories_field;
+
+        public static void expandNativeLibraryDirectories(ClassLoader classLoader,
+                                                          List<File> libPaths) {
+            if (sPathListField == null) return;
+
+            Object pathList = getValue(sPathListField, classLoader);
+            if (pathList == null) return;
+
+            if (sDexPathList_nativeLibraryDirectories_field == null) {
+                sDexPathList_nativeLibraryDirectories_field = getDeclaredField(
+                        pathList.getClass(), "nativeLibraryDirectories");
+                if (sDexPathList_nativeLibraryDirectories_field == null) return;
+            }
+
+            try {
+                // File[] nativeLibraryDirectories
+                Object[] paths = libPaths.toArray();
+                expandArray(pathList, sDexPathList_nativeLibraryDirectories_field, paths, false);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private static final class V23_ extends V14_22 {
+
+        private static Field sDexPathList_nativeLibraryPathElements_field;
+
+        public static void expandNativeLibraryDirectories(ClassLoader classLoader,
+                                                          List<File> libPaths) {
+            if (sPathListField == null) return;
+
+            Object pathList = getValue(sPathListField, classLoader);
+            if (pathList == null) return;
+
+            if (sDexPathList_nativeLibraryDirectories_field == null) {
+                sDexPathList_nativeLibraryDirectories_field = getDeclaredField(
+                        pathList.getClass(), "nativeLibraryDirectories");
+                if (sDexPathList_nativeLibraryDirectories_field == null) return;
+            }
+
+            try {
+                // List<File> nativeLibraryDirectories
+                List<File> paths = getValue(sDexPathList_nativeLibraryDirectories_field, pathList);
+                if (paths == null) return;
+                paths.addAll(libPaths);
+
+                // Element[] nativeLibraryPathElements
+                if (sDexPathList_nativeLibraryPathElements_field == null) {
+                    sDexPathList_nativeLibraryPathElements_field = getDeclaredField(
+                            pathList.getClass(), "nativeLibraryPathElements");
+                }
+                if (sDexPathList_nativeLibraryPathElements_field == null) return;
+
+                int N = libPaths.size();
+                Object[] elements = new Object[N];
+                for (int i = 0; i < N; i++) {
+                    Object dexElement = makeDexElement(libPaths.get(i));
+                    elements[i] = dexElement;
+                }
+
+                expandArray(pathList, sDexPathList_nativeLibraryPathElements_field, elements, false);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    //______________________________________________________________________________________________
+    // API
+
+    public static AssetManager newAssetManager() {
+        AssetManager assets;
+        try {
+            assets = AssetManager.class.newInstance();
+        } catch (InstantiationException e1) {
+            e1.printStackTrace();
+            return null;
+        } catch (IllegalAccessException e1) {
+            e1.printStackTrace();
+            return null;
+        }
+        return assets;
+    }
+
+    public static int addAssetPath(AssetManager assets, String path) {
+        if (sAssetManager_addAssetPath_method == null) {
+            sAssetManager_addAssetPath_method = getMethod(AssetManager.class,
+                    "addAssetPath", new Class[]{String.class});
+        }
+        if (sAssetManager_addAssetPath_method == null) return 0;
+        Integer ret = invoke(sAssetManager_addAssetPath_method, assets, path);
+        if (ret == null) return 0;
+        return ret;
+    }
+
+    public static int[] addAssetPaths(AssetManager assets, String[] paths) {
+        if (sAssetManager_addAssetPaths_method == null) {
+            sAssetManager_addAssetPaths_method = getMethod(AssetManager.class,
+                    "addAssetPaths", new Class[]{String[].class});
+        }
+        if (sAssetManager_addAssetPaths_method == null) return null;
+        return invoke(sAssetManager_addAssetPaths_method, assets, new Object[]{paths});
+    }
+
+    public static void mergeResources(Application app, String[] assetPaths) {
+        AssetManager newAssetManager = newAssetManager();
+        addAssetPaths(newAssetManager, assetPaths);
+
+        try {
+            Method mEnsureStringBlocks = AssetManager.class.getDeclaredMethod("ensureStringBlocks", new Class[0]);
+            mEnsureStringBlocks.setAccessible(true);
+            mEnsureStringBlocks.invoke(newAssetManager, new Object[0]);
+
+            Collection<WeakReference<Resources>> references;
+
+            if (Build.VERSION.SDK_INT >= 19) {
+                Class<?> resourcesManagerClass = Class.forName("android.app.ResourcesManager");
+                Method mGetInstance = resourcesManagerClass.getDeclaredMethod("getInstance", new Class[0]);
+                mGetInstance.setAccessible(true);
+                Object resourcesManager = mGetInstance.invoke(null, new Object[0]);
+                try {
+                    Field fMActiveResources = resourcesManagerClass.getDeclaredField("mActiveResources");
+                    fMActiveResources.setAccessible(true);
+
+                    ArrayMap<?, WeakReference<Resources>> arrayMap = (ArrayMap)fMActiveResources.get(resourcesManager);
+
+                    references = arrayMap.values();
+                } catch (NoSuchFieldException ignore) {
+                    Field mResourceReferences = resourcesManagerClass.getDeclaredField("mResourceReferences");
+                    mResourceReferences.setAccessible(true);
+
+                    references = (Collection) mResourceReferences.get(resourcesManager);
+                }
+            } else {
+                Class<?> activityThread = Class.forName("android.app.ActivityThread");
+                Field fMActiveResources = activityThread.getDeclaredField("mActiveResources");
+                fMActiveResources.setAccessible(true);
+                Object thread = getActivityThread(app, activityThread);
+
+                HashMap<?, WeakReference<Resources>> map = (HashMap)fMActiveResources.get(thread);
+
+                references = map.values();
+            }
+
+            for (WeakReference<Resources> wr : references) {
+                Resources resources = wr.get();
+                if (resources == null) continue;
+
+                try {
+                    Field mAssets = Resources.class.getDeclaredField("mAssets");
+                    mAssets.setAccessible(true);
+                    mAssets.set(resources, newAssetManager);
+                } catch (Throwable ignore) {
+                    Field mResourcesImpl = Resources.class.getDeclaredField("mResourcesImpl");
+                    mResourcesImpl.setAccessible(true);
+                    Object resourceImpl = mResourcesImpl.get(resources);
+                    Field implAssets = resourceImpl.getClass().getDeclaredField("mAssets");
+                    implAssets.setAccessible(true);
+                    implAssets.set(resourceImpl, newAssetManager);
+                }
+
+                resources.updateConfiguration(resources.getConfiguration(), resources.getDisplayMetrics());
+            }
+
+            if (Build.VERSION.SDK_INT >= 21) {
+                for (WeakReference<Resources> wr : references) {
+                    Resources resources = wr.get();
+                    if (resources == null) continue;
+
+                    // android.util.Pools$SynchronizedPool<TypedArray>
+                    Field mTypedArrayPool = Resources.class.getDeclaredField("mTypedArrayPool");
+                    mTypedArrayPool.setAccessible(true);
+                    Object typedArrayPool = mTypedArrayPool.get(resources);
+                    // Clear all the pools
+                    Method acquire = typedArrayPool.getClass().getMethod("acquire");
+                    acquire.setAccessible(true);
+                    while (acquire.invoke(typedArrayPool) != null) ;
+                }
+            }
+        } catch (Throwable e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    public static Object getActivityThread(Context context, Class<?> activityThread) {
+        try {
+            // ActivityThread.currentActivityThread()
+            Method m = activityThread.getMethod("currentActivityThread", new Class[0]);
+            m.setAccessible(true);
+            Object thread = m.invoke(null, new Object[0]);
+            if (thread != null) return thread;
+
+            // context.@mLoadedApk.@mActivityThread
+            Field mLoadedApk = context.getClass().getField("mLoadedApk");
+            mLoadedApk.setAccessible(true);
+            Object apk = mLoadedApk.get(context);
+            Field mActivityThreadField = apk.getClass().getDeclaredField("mActivityThread");
+            mActivityThreadField.setAccessible(true);
+            return mActivityThreadField.get(apk);
+        } catch (Throwable ignore) {}
+
+        return null;
+    }
+
+    public static boolean expandDexPathList(ClassLoader cl, String[] dexPaths, DexFile[] dexFiles) {
+        if (Build.VERSION.SDK_INT < 14) {
+            return V9_13.expandDexPathList(cl, dexPaths, dexFiles);
+        } else {
+            return V14_.expandDexPathList(cl, dexPaths, dexFiles);
+        }
+    }
+
+    public static void expandNativeLibraryDirectories(ClassLoader classLoader, List<File> libPath) {
+        int v = Build.VERSION.SDK_INT;
+        if (v < 14) {
+            V9_13.expandNativeLibraryDirectories(classLoader, libPath);
+        } else if (v < 23) {
+            V14_22.expandNativeLibraryDirectories(classLoader, libPath);
+        } else {
+            V23_.expandNativeLibraryDirectories(classLoader, libPath);
+        }
+    }
+
+    public static Instrumentation.ActivityResult execStartActivity(
+            Instrumentation instrumentation,
+            Context who, IBinder contextThread, IBinder token, Activity target,
+            Intent intent, int requestCode, android.os.Bundle options) {
+        return V21_.execStartActivity(instrumentation,
+                who, contextThread, token, target, intent, requestCode, options);
+    }
+
+    public static Instrumentation.ActivityResult execStartActivity(
+            Instrumentation instrumentation,
+            Context who, IBinder contextThread, IBinder token, Activity target,
+            Intent intent, int requestCode) {
+        return V9_20.execStartActivity(instrumentation,
+                who, contextThread, token, target, intent, requestCode);
+    }
+
+    public static Intent getIntent(Object/*ActivityClientRecord*/ r) {
+        if (sActivityClientRecord_intent_field == null) {
+            sActivityClientRecord_intent_field = getDeclaredField(r.getClass(), "intent");
+        }
+        return getValue(sActivityClientRecord_intent_field, r);
+    }
+
+    public static void setActivityInfo(Object/*ActivityClientRecord*/ r, ActivityInfo ai) {
+        if (sActivityClientRecord_activityInfo_field == null) {
+            sActivityClientRecord_activityInfo_field = getDeclaredField(
+                    r.getClass(), "activityInfo");
+        }
+        setValue(sActivityClientRecord_activityInfo_field, r, ai);
+    }
+
+    //______________________________________________________________________________________________
+    // Private
 
     /**
      * Add elements to Object[] with reflection
@@ -178,8 +551,8 @@ public class ReflectAccelerator {
      * @param push true=push to array head, false=append to array tail
      * @throws IllegalAccessException
      */
-    public static void expandArray(Object target, Field arrField,
-                                   Object[] extraElements, boolean push)
+    private static void expandArray(Object target, Field arrField,
+                                    Object[] extraElements, boolean push)
             throws IllegalAccessException {
         Object[] original = (Object[]) arrField.get(target);
         Object[] combined = (Object[]) Array.newInstance(
@@ -194,7 +567,7 @@ public class ReflectAccelerator {
         arrField.set(target, combined);
     }
 
-    public static void sliceArray(Object target, Field arrField, int deleteIndex)
+    private static void sliceArray(Object target, Field arrField, int deleteIndex)
             throws  IllegalAccessException {
         Object[] original = (Object[]) arrField.get(target);
         if (original.length == 0) return;
@@ -213,206 +586,9 @@ public class ReflectAccelerator {
         arrField.set(target, sliced);
     }
 
-    private static void fillDexPathList(ClassLoader cl, Object element)
-            throws NoSuchFieldException, IllegalAccessException {
-        if (sPathListField == null) {
-            sPathListField = getDeclaredField(DexClassLoader.class.getSuperclass(), "pathList");
-        }
-        Object pathList = sPathListField.get(cl);
-        if (sDexElementsField == null) {
-            sDexElementsField = getDeclaredField(pathList.getClass(), "dexElements");
-        }
-        expandArray(pathList, sDexElementsField, new Object[]{element}, true);
-    }
-
-    public static void removeDexPathList(ClassLoader cl, int deleteIndex) {
-        try {
-            if (sPathListField == null) {
-                sPathListField = getDeclaredField(DexClassLoader.class.getSuperclass(), "pathList");
-            }
-            Object pathList = sPathListField.get(cl);
-            if (sDexElementsField == null) {
-                sDexElementsField = getDeclaredField(pathList.getClass(), "dexElements");
-            }
-            sliceArray(pathList, sDexElementsField, deleteIndex);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    public static void setTheme(Activity activity, Resources.Theme theme) {
-        if (sContextThemeWrapper_mTheme_field == null) {
-            sContextThemeWrapper_mTheme_field = getDeclaredField(
-                    ContextThemeWrapper.class, "mTheme");
-        }
-        if (sContextThemeWrapper_mTheme_field == null) return;
-        setValue(sContextThemeWrapper_mTheme_field, activity, theme);
-    }
-
-    public static void setResources(Activity activity, Resources resources) {
-        // Modify the base context resources, fix #80
-        setResources(activity.getBaseContext(), resources);
-
-        // Compat for API 16+
-        if (Build.VERSION.SDK_INT > 16) {
-            if (sContextThemeWrapper_mResources_field == null) {
-                sContextThemeWrapper_mResources_field = getDeclaredField(
-                        ContextThemeWrapper.class, "mResources");
-            }
-            setValue(sContextThemeWrapper_mResources_field, activity, resources);
-        }
-
-        // Compat for AppCompat 23.2+
-        if (activity instanceof AppCompatActivity) {
-            if (sAppCompatActivityHasNoResourcesField) return; // below 23.2
-
-            if (sAppCompatActivity_mResources_field == null) {
-                sAppCompatActivity_mResources_field = getDeclaredField(
-                        AppCompatActivity.class, "mResources");
-                if (sAppCompatActivity_mResources_field == null) {
-                    sAppCompatActivityHasNoResourcesField = true;
-                    return;
-                }
-            }
-            // Set the `mResources' to null, and the AppCompatActivity.getResources() will
-            // re-lazy-initialized it with the `TintResources` class.
-            setValue(sAppCompatActivity_mResources_field, activity, null);
-        }
-    }
-
-    public static void setResources(Application app, Resources resources) {
-        setResources(app.getBaseContext(), resources);
-    }
-
-    public static void setResources(Context context, Resources resources) {
-        if (sContextImpl_mResources_field == null) {
-            sContextImpl_mResources_field = getDeclaredField(
-                    context.getClass(), "mResources");
-            if (sContextImpl_mResources_field == null) return;
-        }
-        setValue(sContextImpl_mResources_field, context, resources);
-    }
-
-    public static Object getActivityThread(Context context) {
-        if (context instanceof Activity) {
-            if (sActivity_mMainThread_field == null) {
-                sActivity_mMainThread_field = getDeclaredField(Activity.class, "mMainThread");
-            }
-            if (sActivity_mMainThread_field == null) return null;
-            return getValue(sActivity_mMainThread_field, context);
-        } else {
-            if (sActivityThread_currentActivityThread_method == null) {
-                try {
-                    Class<?> activityThreadClazz = Class.forName("android.app.ActivityThread");
-                    sActivityThread_currentActivityThread_method = getMethod(
-                            activityThreadClazz, "currentActivityThread", null);
-                } catch (ClassNotFoundException e) {
-                    return null;
-                }
-            }
-            return invoke(sActivityThread_currentActivityThread_method, null, (Object[]) null);
-        }
-    }
-
-    public static AssetManager newAssetManager() {
-        AssetManager assets;
-        try {
-            assets = AssetManager.class.newInstance();
-        } catch (InstantiationException e1) {
-            e1.printStackTrace();
-            return null;
-        } catch (IllegalAccessException e1) {
-            e1.printStackTrace();
-            return null;
-        }
-        return assets;
-    }
-
-    public static Instrumentation.ActivityResult execStartActivityV21(
-            Instrumentation instrumentation,
-            Context who, IBinder contextThread, IBinder token, Activity target,
-            Intent intent, int requestCode, android.os.Bundle options) {
-        if (sInstrumentation_execStartActivityV21_method == null) {
-            Class[] types = new Class[] {Context.class, IBinder.class, IBinder.class,
-                    Activity.class, Intent.class, int.class, android.os.Bundle.class};
-            sInstrumentation_execStartActivityV21_method = getMethod(Instrumentation.class,
-                    "execStartActivity", types);
-        }
-        if (sInstrumentation_execStartActivityV21_method == null) return null;
-        return invoke(sInstrumentation_execStartActivityV21_method, instrumentation,
-                who, contextThread, token, target, intent, requestCode, options);
-    }
-
-    public static Instrumentation.ActivityResult execStartActivityV20(
-            Instrumentation instrumentation,
-            Context who, IBinder contextThread, IBinder token, Activity target,
-            Intent intent, int requestCode) {
-        if (sInstrumentation_execStartActivityV20_method == null) {
-            Class[] types = new Class[] {Context.class, IBinder.class, IBinder.class,
-                    Activity.class, Intent.class, int.class};
-            sInstrumentation_execStartActivityV20_method = getMethod(Instrumentation.class,
-                    "execStartActivity", types);
-        }
-        if (sInstrumentation_execStartActivityV20_method == null) return null;
-        return invoke(sInstrumentation_execStartActivityV20_method, instrumentation,
-                who, contextThread, token, target, intent, requestCode);
-    }
-
-    /**
-     * @see <a href="https://github.com/android/platform_frameworks_base/blob/gingerbread-release/core%2Fjava%2Fandroid%2Fcontent%2Fpm%2FPackageParser.java">PackageParser.java</a>
-     */
-    public static Signature[] getSignaturesV13(File plugin) {
-        try {
-            if (sPackageParser_constructor == null) {
-                Class clazz = Class.forName("android.content.pm.PackageParser");
-                sPackageParser_constructor = clazz.getConstructors()[0];
-                if (sPackageParser_constructor == null) return null;
-
-                sPackageParser_parsePackage_method = getDeclaredMethod(clazz, "parsePackage",
-                        new Class[]{File.class, String.class, DisplayMetrics.class, Integer.TYPE});
-                if (sPackageParser_parsePackage_method == null) return null;
-
-                Class pkgClazz = sPackageParser_parsePackage_method.getReturnType();
-                sPackageParser_collectCertificates_method = getDeclaredMethod(clazz,
-                        "collectCertificates",
-                        new Class[]{pkgClazz, Integer.TYPE});
-                if (sPackageParser_collectCertificates_method == null) return null;
-
-                sPackageParser$Package_mSignatures_field = getDeclaredField(pkgClazz, "mSignatures");
-                if (sPackageParser$Package_mSignatures_field == null) return null;
-            }
-
-            String path = plugin.getPath();
-            Object parser = sPackageParser_constructor.newInstance(path);
-            DisplayMetrics metrics = new DisplayMetrics();
-            metrics.setToDefaults();
-            Object pkg = sPackageParser_parsePackage_method.invoke(parser,
-                    plugin, path, metrics, PackageManager.GET_SIGNATURES);
-            sPackageParser_collectCertificates_method.invoke(parser,
-                    pkg, PackageManager.GET_SIGNATURES);
-            return getValue(sPackageParser$Package_mSignatures_field, pkg);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
-    //______________________________________________________________________________________________
-    // Private
-
     private static Method getMethod(Class cls, String methodName, Class[] types) {
         try {
             Method method = cls.getMethod(methodName, types);
-            method.setAccessible(true);
-            return method;
-        } catch (NoSuchMethodException e) {
-            return null;
-        }
-    }
-
-    private static Method getDeclaredMethod(Class cls, String methodName, Class[] types) {
-        try {
-            Method method = cls.getDeclaredMethod(methodName, types);
             method.setAccessible(true);
             return method;
         } catch (NoSuchMethodException e) {

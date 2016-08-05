@@ -16,6 +16,9 @@ dependencies {
     compile 'org.codehaus.groovy:groovy-all:2.4.4'
 }
 
+apply from: 'provided.gradle'
+apply from: 'version.gradle'
+
 //import org.gradle.api.tasks.javadoc.GroovyDoc
 
 //--------------------------------------------------------------------------------------------------
@@ -38,7 +41,7 @@ buildscript {
         jcenter()
     }
     dependencies {
-        classpath 'com.jfrog.bintray.gradle:gradle-bintray-plugin:1.4'
+        classpath 'com.jfrog.bintray.gradle:gradle-bintray-plugin:1.6'
     }
 }
 
