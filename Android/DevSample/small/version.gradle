@@ -1,6 +1,7 @@
 ext {
     versionTags = [
             [start: "aarVersion = '", end: "'", path: '../../Sample/build.gradle'],
+            [start: "aarVersion = '", end: "'", path: '../../README.md'],
             [start: "aarVersion = '", end: "'", path: '../../GETTING-STARTED.md'],
             [start: '"smallAarVersion" value="', end: '" />', path: '../../templates/activities/SmallLauncher/globals.xml.ftl']
     ]
@@ -31,7 +32,7 @@ def updateVersions() {
     }
 }
 
-task checkVersions << {
+task ('checkVersions') .doLast {
     def changelog = project.file('CHANGELOG.md')
     if (!changelog.exists()) return
 
@@ -44,7 +45,7 @@ task checkVersions << {
     }
 }
 
-task updateVersions << {
+task ('updateVersions') .doLast {
     updateVersions()
 }
 
